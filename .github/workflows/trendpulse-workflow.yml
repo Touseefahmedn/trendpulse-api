@@ -1,0 +1,127 @@
+name: TrendPulse Auto-Update
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'  # Every 6 hours
+  workflow_dispatch:  # Manual trigger
+
+jobs:
+  update-trends:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Setup Node
+      uses: actions/setup-node@v3
+      with:
+        node-version: '18'
+
+    - name: Fetch Trending Data
+      run: |
+        node << 'EOF'
+        const https = require('https');
+        const fs = require('fs');
+
+        // Fetch Google Trends RSS
+        function fetchGoogleTrends() {
+          return new Promise((resolve) => {
+            const options = {
+              hostname: 'trends.google.com',
+              path: '/trends/trendingsearches/daily/rss?geo=US',
+              method: 'GET',
+              headers: { 'User-Agent': 'RankMine-Bot/1.0' }
+            };
+            const req = https.request(options, (res) => {
+              let data = '';
+              res.on('data', chunk => data += chunk);
+              res.on('end', () => resolve(data));
+            });
+            req.on('error', () => resolve(''));
+            req.setTimeout(10000, () => { req.destroy(); resolve(''); });
+            req.end();
+          });
+        }
+
+        // Fetch Reddit Hot
+        function fetchReddit() {
+          return new Promise((resolve) => {
+            const req = https.request({
+              hostname: 'www.reddit.com',
+              path: '/r/artificial/hot.json?limit=25',
+              method: 'GET',
+              headers: { 'User-Agent': 'RankMine-Bot/1.0' }
+            }, (res) => {
+              let data = '';
+              res.on('data', chunk => data += chunk);
+              res.on('end', () => resolve(data));
+            });
+            req.on('error', () => resolve(''));
+            req.setTimeout(10000, () => { req.destroy(); resolve(''); });
+            req.end();
+          });
+        }
+
+        async function main() {
+          const [googleData, redditData] = await Promise.all([
+            fetchGoogleTrends(),
+            fetchReddit()
+          ]);
+
+          // Parse and merge data
+          const trends = [];
+
+          // Parse Google Trends RSS
+          if (googleData) {
+            const titles = googleData.match(/<title>([^<]+)<\/title>/g);
+            if (titles) {
+              titles.slice(2, 15).forEach((t, i) => {
+                const title = t.replace(/<\/?title>/g, '');
+                if (title.length > 3) {
+                  trends.push({
+                    title: title,
+                    source: 'google_trends',
+                    rank: i + 1,
+                    timestamp: new Date().toISOString()
+                  });
+                }
+              });
+            }
+          }
+
+          // Parse Reddit
+          if (redditData) {
+            try {
+              const json = JSON.parse(redditData);
+              json.data.children.slice(0, 10).forEach((post, i) => {
+                trends.push({
+                  title: post.data.title.substring(0, 80),
+                  source: 'reddit',
+                  subreddit: post.data.subreddit,
+                  ups: post.data.ups,
+                  rank: i + 1
+                });
+              });
+            } catch(e) {}
+          }
+
+          // Save merged data
+          const output = {
+            updated: new Date().toISOString(),
+            total: trends.length,
+            trends: trends
+          };
+
+          fs.writeFileSync('trends-data.json', JSON.stringify(output, null, 2));
+          console.log('✅ Updated trends-data.json with', trends.length, 'items');
+        }
+
+        main();
+        EOF
+
+    - name: Commit Changes
+      run: |
+        git config user.name "TrendPulse Bot"
+        git config user.email "bot@rankmine.com"
+        git add trends-data.json || true
+        git diff --staged --quiet || git commit -m "🔄 Auto-update trends: $(date -u '+%Y-%m-%d %H:%M UTC')"
+        git push || echo "No changes to push"
